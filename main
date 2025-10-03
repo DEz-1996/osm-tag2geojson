@@ -1,0 +1,333 @@
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.*;
+
+public class Main {
+
+    private static final String DEFAULT_ENDPOINT = "https://overpass-api.de/api/interpreter";
+    private static final String DEFAULT_CITY_REGEX = "^(Київ|Kyiv)$";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    // ---------------- Геометричні утиліти ----------------
+    static List<List<Double>> ensureClosed(List<List<Double>> coords) {
+        if (coords == null || coords.isEmpty()) return coords;
+        if (!coords.get(0).equals(coords.get(coords.size() - 1))) {
+            coords = new ArrayList<>(coords);
+            coords.add(coords.get(0));
+        }
+        return coords;
+    }
+
+    static double signedArea(List<List<Double>> coords) {
+        if (coords == null || coords.size() < 4) return 0.0;
+        double s = 0.0;
+        for (int i = 0; i < coords.size() - 1; i++) {
+            double x1 = coords.get(i).get(0);
+            double y1 = coords.get(i).get(1);
+            double x2 = coords.get(i + 1).get(0);
+            double y2 = coords.get(i + 1).get(1);
+            s += x1 * y2 - x2 * y1;
+        }
+        return 0.5 * s;
+    }
+
+    static List<List<Double>> orientCCW(List<List<Double>> coords) {
+        coords = ensureClosed(coords);
+        return signedArea(coords) > 0 ? coords : reverse(coords);
+    }
+
+    static List<List<Double>> orientCW(List<List<Double>> coords) {
+        coords = ensureClosed(coords);
+        return signedArea(coords) < 0 ? coords : reverse(coords);
+    }
+
+    static List<List<Double>> reverse(List<List<Double>> coords) {
+        List<List<Double>> rev = new ArrayList<>(coords);
+        Collections.reverse(rev);
+        return rev;
+    }
+
+    // ---------------- Overpass ----------------
+    static String makeQuery(String cityRegex, List<Map.Entry<String, String>> tagPairs) {
+        if (tagPairs.isEmpty()) {
+            tagPairs = List.of(Map.entry("leisure", "park"));
+        }
+        StringBuilder sb = new StringBuilder();
+        for (var e : tagPairs) {
+            sb.append("way[\"").append(e.getKey()).append("\"=\"").append(e.getValue()).append("\"](area.a);\n");
+            sb.append("rel(bw);\n");
+            sb.append("relation[\"").append(e.getKey()).append("\"=\"").append(e.getValue()).append("\"](area.a);\n");
+        }
+        return """
+                [out:json][timeout:60];
+                area["boundary"="administrative"]["name"~"%s", i]->.a;
+                (
+                %s
+                );
+                out body;
+                >;
+                out skel qt;
+                """.formatted(cityRegex, sb);
+    }
+
+    static Map<String, Object> fetchOverpass(String endpoint, String query) throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newHttpClient();
+        String body = "data=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
+        HttpRequest req = HttpRequest.newBuilder(URI.create(endpoint))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .timeout(java.time.Duration.ofSeconds(120))
+                .build();
+
+        HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+        return MAPPER.readValue(resp.body(), new TypeReference<>() {});
+    }
+
+    // ---------------- Побудова геометрій ----------------
+    static class Way {
+        List<Long> nodes;
+        Map<String, Object> tags;
+    }
+
+    static class RelationMember {
+        String type;
+        String role;
+        long ref;
+    }
+
+    static Map<Long, List<Double>> nodes = new HashMap<>();
+    static Map<Long, Way> ways = new HashMap<>();
+    static List<Map<String, Object>> rels = new ArrayList<>();
+
+    static void buildIndex(Map<String, Object> osm) {
+        nodes.clear();
+        ways.clear();
+        rels.clear();
+
+        List<Map<String, Object>> elements = (List<Map<String, Object>>) osm.get("elements");
+        if (elements == null) return;
+
+        for (var el : elements) {
+            String type = (String) el.get("type");
+            if ("node".equals(type)) {
+                long id = ((Number) el.get("id")).longValue();
+                double lon = ((Number) el.get("lon")).doubleValue();
+                double lat = ((Number) el.get("lat")).doubleValue();
+                nodes.put(id, List.of(lon, lat));
+            } else if ("way".equals(type)) {
+                Way w = new Way();
+                w.nodes = ((List<?>) el.get("nodes")).stream().map(o -> ((Number) o).longValue()).toList();
+                w.tags = (Map<String, Object>) el.getOrDefault("tags", new HashMap<>());
+                ways.put(((Number) el.get("id")).longValue(), w);
+            } else if ("relation".equals(type)) {
+                rels.add(el);
+            }
+        }
+    }
+
+    static List<List<Double>> wayRing(long wid) {
+        Way w = ways.get(wid);
+        if (w == null) return null;
+        List<List<Double>> coords = new ArrayList<>();
+        for (Long nid : w.nodes) {
+            List<Double> p = nodes.get(nid);
+            if (p == null) return null;
+            coords.add(p);
+        }
+        if (coords.size() < 4 || !coords.get(0).equals(coords.get(coords.size() - 1))) return null;
+        return coords;
+    }
+
+    static List<List<List<Double>>> stitchWays(List<Long> wayIds) {
+        List<List<List<Double>>> segments = new ArrayList<>();
+        for (Long wid : wayIds) {
+            Way w = ways.get(wid);
+            if (w == null) continue;
+            List<List<Double>> seg = new ArrayList<>();
+            boolean ok = true;
+            for (Long nid : w.nodes) {
+                List<Double> pt = nodes.get(nid);
+                if (pt == null) { ok = false; break; }
+                seg.add(pt);
+            }
+            if (ok && seg.size() >= 2) segments.add(seg);
+        }
+
+        List<List<List<Double>>> rings = new ArrayList<>();
+        boolean[] used = new boolean[segments.size()];
+        for (int i = 0; i < segments.size(); i++) {
+            if (used[i]) continue;
+            List<List<Double>> chain = new ArrayList<>(segments.get(i));
+            used[i] = true;
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (int j = 0; j < segments.size(); j++) {
+                    if (used[j]) continue;
+                    List<List<Double>> s = segments.get(j);
+                    if (chain.get(chain.size() - 1).equals(s.get(0))) {
+                        chain.addAll(s.subList(1, s.size())); used[j] = true; changed = true;
+                    } else if (chain.get(chain.size() - 1).equals(s.get(s.size() - 1))) {
+                        List<List<Double>> rev = new ArrayList<>(s);
+                        Collections.reverse(rev);
+                        chain.addAll(rev.subList(1, rev.size())); used[j] = true; changed = true;
+                    } else if (chain.get(0).equals(s.get(s.size() - 1))) {
+                        chain.addAll(0, s.subList(0, s.size() - 1)); used[j] = true; changed = true;
+                    } else if (chain.get(0).equals(s.get(0))) {
+                        List<List<Double>> rev = new ArrayList<>(s);
+                        Collections.reverse(rev);
+                        chain.addAll(0, rev.subList(0, rev.size() - 1)); used[j] = true; changed = true;
+                    }
+                }
+            }
+            if (chain.size() >= 4 && chain.get(0).equals(chain.get(chain.size() - 1))) {
+                rings.add(chain);
+            }
+        }
+        return rings;
+    }
+
+    static List<Map<String, Object>> collectFeatures(Map<String, Object> osm) {
+        buildIndex(osm);
+        List<Map<String, Object>> feats = new ArrayList<>();
+
+        // 1) Замкнені ways
+        for (var entry : ways.entrySet()) {
+            long wid = entry.getKey();
+            Way w = entry.getValue();
+            List<List<Double>> ring = wayRing(wid);
+            if (ring == null) continue;
+            List<List<Double>> outer = orientCCW(ring);
+            Map<String, Object> geom = Map.of("type", "Polygon", "coordinates", List.of(outer));
+            feats.add(Map.of(
+                    "id", "way:" + wid,
+                    "geometry", geom,
+                    "props", w.tags
+            ));
+        }
+
+        // 2) Relations multipolygon/boundary
+        Set<Long> seenRel = new HashSet<>();
+        for (var r : rels) {
+            Map<String, Object> tags = (Map<String, Object>) r.getOrDefault("tags", Map.of());
+            String type = (String) tags.get("type");
+            if (!Objects.equals(type, "multipolygon") && !Objects.equals(type, "boundary")) continue;
+            long rid = ((Number) r.get("id")).longValue();
+            if (!seenRel.add(rid)) continue;
+
+            List<Map<String, Object>> members = (List<Map<String, Object>>) r.get("members");
+            List<Long> outers = new ArrayList<>();
+            List<Long> inners = new ArrayList<>();
+            for (var m : members) {
+                if (!"way".equals(m.get("type"))) continue;
+                String role = (String) m.getOrDefault("role", "");
+                long ref = ((Number) m.get("ref")).longValue();
+                if (role.isEmpty() || "outer".equals(role)) outers.add(ref);
+                else if ("inner".equals(role)) inners.add(ref);
+            }
+
+            List<List<List<Double>>> outerRings = stitchWays(outers);
+            List<List<List<Double>>> innerRings = stitchWays(inners);
+
+            if (outerRings.isEmpty()) continue;
+
+            List<Object> polys = new ArrayList<>();
+            for (List<List<Double>> o : outerRings) {
+                List<List<Double>> outer = orientCCW(o);
+                List<List<List<Double>>> holes = new ArrayList<>();
+                for (List<List<Double>> h : innerRings) holes.add(orientCW(h));
+                List<Object> poly = new ArrayList<>();
+                poly.add(outer);
+                if (!holes.isEmpty()) poly.addAll(holes);
+                polys.add(poly);
+            }
+
+            Map<String, Object> geom;
+            if (polys.size() == 1) {
+                geom = Map.of("type", "Polygon", "coordinates", polys.get(0));
+            } else {
+                geom = Map.of("type", "MultiPolygon", "coordinates", polys);
+            }
+
+            feats.add(Map.of(
+                    "id", "relation:" + rid,
+                    "geometry", geom,
+                    "props", tags
+            ));
+        }
+
+        return feats;
+    }
+
+    // ---------------- Експорт ----------------
+    static void saveGeojson(List<Map<String, Object>> features, Path outPath) throws IOException {
+        Map<String, Object> fc = new LinkedHashMap<>();
+        fc.put("type", "FeatureCollection");
+        List<Object> feats = new ArrayList<>();
+        for (var f : features) {
+            Map<String, Object> feat = new LinkedHashMap<>();
+            feat.put("type", "Feature");
+            feat.put("geometry", f.get("geometry"));
+
+            Map<String, Object> props = new LinkedHashMap<>();
+            if (f.get("props") instanceof Map<?, ?> p) {
+                props.putAll((Map<String, Object>) p);
+            }
+            props.put("_osm_id", f.get("id"));
+            feat.put("properties", props);
+            feats.add(feat);
+        }
+        fc.put("features", feats);
+
+        try (PrintWriter out = new PrintWriter(outPath.toFile(), StandardCharsets.UTF_8)) {
+            out.print(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(fc));
+        }
+    }
+
+    // ---------------- CLI ----------------
+    public static void main(String[] args) {
+        String endpoint = DEFAULT_ENDPOINT;
+        String city = DEFAULT_CITY_REGEX;
+        List<Map.Entry<String, String>> tags = new ArrayList<>();
+        Path out = Path.of("output.geojson");
+
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case "--endpoint" -> endpoint = args[++i];
+                case "--city" -> city = args[++i];
+                case "--tag" -> {
+                    String[] kv = args[++i].split("=", 2);
+                    if (kv.length != 2) throw new IllegalArgumentException("Tag must be key=value");
+                    tags.add(Map.entry(kv[0].trim(), kv[1].trim()));
+                }
+                case "--out" -> out = Path.of(args[++i]);
+            }
+        }
+
+        try {
+            String query = makeQuery(city, tags);
+            Map<String, Object> osm = fetchOverpass(endpoint, query);
+            List<Map<String, Object>> feats = collectFeatures(osm);
+
+            if (feats.isEmpty()) {
+                System.out.println("[INFO] Об'єктів не знайдено.");
+                return;
+            }
+            saveGeojson(feats, out);
+            System.out.printf("[OK] GeoJSON записано: %s (%d об’єктів)\n", out, feats.size());
+        } catch (Exception e) {
+            System.err.println("[ERR] " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
