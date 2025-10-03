@@ -1,0 +1,62 @@
+package osm2geojson;
+
+
+import org.junit.jupiter.api.*;
+import java.nio.file.*;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+
+public class MainIntegrationTest {
+
+
+private static final String ENDPOINT = "https://overpass-api.de/api/interpreter";
+private static final String CITY = "^(Київ|Kyiv)$";
+
+
+@Test
+@Disabled("Реальний виклик Overpass API – може бути нестабільним або повільним")
+void testRealOverpassCall() throws Exception {
+String query = Main.makeQuery(CITY, List.of(new String[]{"leisure", "park"}));
+Map<String, Object> osm = Main.fetchOverpass(ENDPOINT, query);
+
+
+assertNotNull(osm);
+assertTrue(osm.containsKey("elements"));
+
+
+List<Map<String, Object>> feats = Main.collectFeatures(osm);
+assertNotNull(feats);
+assertFalse(feats.isEmpty(), "Очікуємо хоча б один парк у Києві");
+}
+
+
+@Test
+void testMockOverpassCall() throws Exception {
+// Імітуємо відповідь Overpass для простого замкненого way
+Map<String, Object> node1 = Map.of("type", "node", "id", 1L, "lon", 30.0, "lat", 50.0);
+Map<String, Object> node2 = Map.of("type", "node", "id", 2L, "lon", 31.0, "lat", 50.0);
+Map<String, Object> node3 = Map.of("type", "node", "id", 3L, "lon", 31.0, "lat", 51.0);
+Map<String, Object> node4 = Map.of("type", "node", "id", 4L, "lon", 30.0, "lat", 51.0);
+Map<String, Object> way = Map.of(
+"type", "way",
+"id", 10L,
+"nodes", List.of(1L, 2L, 3L, 4L, 1L),
+"tags", Map.of("leisure", "park")
+);
+
+
+Map<String, Object> osm = Map.of("elements", List.of(node1, node2, node3, node4, way));
+List<Map<String, Object>> feats = Main.collectFeatures(osm);
+
+
+assertEquals(1, feats.size());
+Map<String, Object> feat = feats.get(0);
+assertEquals("way:10", feat.get("id"));
+
+
+@SuppressWarnings("unchecked")
+Map<String, Object> geom = (Map<String, Object>) feat.get("geometry");
+assertEquals("Polygon", geom.get("type"));
+}
+}
