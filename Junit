@@ -1,0 +1,91 @@
+import com.fasterxml.jackson.databind.ObjectMapper;
+coords.add(List.of(0.0, 0.0));
+coords.add(List.of(1.0, 0.0));
+coords.add(List.of(1.0, 1.0));
+List<List<Double>> closed = Main.ensureClosed(coords);
+assertEquals(closed.get(0), closed.get(closed.size() - 1), "Polygon should be closed");
+}
+
+
+@Test
+void testSignedAreaAndOrientation() {
+List<List<Double>> square = new ArrayList<>();
+square.add(List.of(0.0, 0.0));
+square.add(List.of(1.0, 0.0));
+square.add(List.of(1.0, 1.0));
+square.add(List.of(0.0, 1.0));
+square.add(List.of(0.0, 0.0));
+
+
+double area = Main.signedArea(square);
+assertTrue(area > 0, "Area should be positive for CCW");
+
+
+List<List<Double>> ccw = Main.orientCCW(square);
+assertTrue(Main.signedArea(ccw) > 0, "CCW orientation should have positive area");
+
+
+List<List<Double>> cw = Main.orientCW(square);
+assertTrue(Main.signedArea(cw) < 0, "CW orientation should have negative area");
+}
+
+
+@Test
+void testMakeQueryDefaultTag() {
+String query = Main.makeQuery("Kyiv", List.of());
+assertTrue(query.contains("leisure"), "Default query should contain leisure=park");
+assertTrue(query.contains("Kyiv"), "City name should be present");
+}
+
+
+@Test
+void testMakeQueryCustomTags() {
+List<Map.Entry<String, String>> tags = List.of(Map.entry("amenity", "school"));
+String query = Main.makeQuery("Kyiv", tags);
+assertTrue(query.contains("amenity"), "Query should contain custom tag");
+assertTrue(query.contains("school"), "Query should contain tag value");
+}
+
+
+@Test
+void testSaveGeojson() throws IOException {
+List<Map<String, Object>> features = new ArrayList<>();
+Map<String, Object> feat = new HashMap<>();
+feat.put("id", 123L);
+feat.put("geometry", Map.of("type", "Point", "coordinates", List.of(30.0, 50.0)));
+feat.put("props", Map.of("name", "Test Point"));
+features.add(feat);
+
+
+Path out = Files.createTempFile("geojson_test", ".geojson");
+Main.saveGeojson(features, out);
+
+
+String content = Files.readString(out);
+assertTrue(content.contains("FeatureCollection"));
+assertTrue(content.contains("Test Point"));
+assertTrue(content.contains("123"));
+
+
+// Перевірка, що JSON можна розпарсити
+ObjectMapper mapper = new ObjectMapper();
+Map parsed = mapper.readValue(content, Map.class);
+assertEquals("FeatureCollection", parsed.get("type"));
+List feats = (List) parsed.get("features");
+assertEquals(1, feats.size());
+}
+
+
+@Test
+void testReverse() {
+List<List<Double>> coords = new ArrayList<>();
+coords.add(List.of(0.0, 0.0));
+coords.add(List.of(1.0, 0.0));
+coords.add(List.of(2.0, 0.0));
+
+
+List<List<Double>> reversed = Main.reverse(coords);
+assertEquals(List.of(2.0, 0.0), reversed.get(0));
+assertEquals(List.of(0.0, 0.0), reversed.get(2));
+}
+}
