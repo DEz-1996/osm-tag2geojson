@@ -89,6 +89,109 @@ java -jar osm2geojson.jar --tag leisure=park --tag leisure=playground --out leis
 - Jackson (для роботи з JSON)
 - JUnit 5 (для тестів)
 
+///////////////////////////////////////////////////////////////////////////////
+
+# Overpass API POI Fetcher
+
+Цей проєкт — невелика Java-утиліта для отримання **точок інтересу (POI)** з **Overpass API** (OpenStreetMap) та збереження результатів у **GeoJSON** форматі.
+
+---
+
+## Можливості
+
+- Отримання POI в межах полігону (з підтримкою `ST_DWithin` на стороні БД).
+- Гнучкий CLI:
+  - Вхід полігону (GeoJSON або inline-координати).
+  - Фільтр категорій (наприклад, `amenity=restaurant`, `shop=supermarket`).
+  - Вибір файлу для виводу.
+- Результат у форматі **GeoJSON FeatureCollection**.
+- Юніт та інтеграційні тести (з моками для стабільності).
+- Збірка fat-jar для самостійного запуску.
+
+---
+
+## Вимоги
+
+- **Java 21**
+- **Maven 3.9+**
+- Доступ до інтернету (для реальних запитів до Overpass API).
+
+---
+
+## Збірка
+
+```bash
+mvn clean package
+Файл буде створено у target/:
+
+pgsql
+Копіювати код
+target/overpass-poi-fetcher-1.0-SNAPSHOT-jar-with-dependencies.jar
+Використання
+Приклад: отримати ресторани в межах полігону
+bash
+Копіювати код
+java -jar target/overpass-poi-fetcher-1.0-SNAPSHOT-jar-with-dependencies.jar \
+  --polygon "30.5234 50.4501,30.5240 50.4505,30.5250 50.4499,30.5234 50.4501" \
+  --category "amenity=restaurant" \
+  --output pois.geojson
+Аргументи:
+
+--polygon – полігон у форматі lon lat (або шлях до GeoJSON файлу).
+
+--category – фільтр POI (можна кілька).
+
+--output – шлях до результату.
+
+Приклад результату
+json
+Копіювати код
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [30.523, 50.450]
+      },
+      "properties": {
+        "id": 123456,
+        "name": "Restaurant Example",
+        "amenity": "restaurant"
+      }
+    }
+  ]
+}
+Тестування
+Юніт-тести
+bash
+Копіювати код
+mvn test
+Парсинг геометрії
+
+Побудова Overpass-запитів
+
+JSON-серіалізація
+
+Інтеграційний тест
+Реальний виклик API (з моками для стабільності):
+
+bash
+Копіювати код
+mvn -Dtest=OverpassIntegrationTest test
+Залежності
+Jackson – для JSON
+
+JUnit 5 – для тестування
+
+Maven Assembly Plugin – для створення fat-jar
+
+Примітки
+Overpass API має обмеження по кількості запитів.
+
+Для великих полігонів краще розбивати запит на частини.
+
 
 ## Майбутні покращення
 - Додати WireMock для стабільних інтеграційних тестів.
